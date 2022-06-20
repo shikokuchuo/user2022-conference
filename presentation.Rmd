@@ -1,0 +1,1341 @@
+---
+title: "R's C Interface"
+subtitle: "Perspectives from Wrapping a C Library"
+author: "Charlie Gao"
+institute: "Hibiki AI"
+date: "2022/05/29 (updated: `r Sys.Date()`)"
+output:
+  xaringan::moon_reader:
+    css: [useR, useR-fonts, "custom.css"]
+    lib_dir: libs
+    nature:
+      highlightStyle: solarized-light
+      highlightLines: true
+      countIncrementalSlides: false
+    chakra: libs/remark-latest.min.js
+---
+
+class: chapter-slide
+
+# Perspectives from Wrapping a C Library
+
+---
+
+### nanonext R package
+
+<img src="img/logo.png" alt="nanonext hex sticker" width="100" />
+
+- R binding for NNG (Nanomsg Next Generation)
+
+- Successor to ZeroMQ
+
+- Socket library & concurrency framework
+
+- Written in C
+
+- High performance
+
+---
+
+### Key Use Cases for nanonext
+
+- Concurrency / message-passing
+  + Classic RPC (remote procedure call) computing
+  + Send message (serialized R object) to another process for computation
+  + 'mirai' package provides convenient abstraction layer
+  
+- Linking code across different languages
+  + Native NNG implementations in C and Golang
+  + Bindings for C++, Python, Java, Rust etc.
+  + Python (Numpy) arrays interoperable with R vectors
+  
+- Async HTTP and Websocket Client
+  + Query REST APIs
+  + Receive real time websocket data feeds
+
+---
+
+class: chapter-slide
+
+# Appendices A, B, C, D, E
+
+---
+
+class: chapter-slide
+
+# Why C?
+
+---
+
+class: chapter-slide
+
+# C provides the ultimate performance
+
+---
+
+### Example 1: Matrix to Dataframe Conversion
+
+<span class="highlight1">SLOWEST</span>
+
+1. as.data.frame()
+
+2. Rcpp coerce to data frame
+
+3. Efficient method in R
+
+4. Memcpy in C
+
+<span class="highlight2">FASTEST</span>
+
+=>
+
+- Not simply a compiled / interpreted code dichotomy
+
+---
+
+### Example 2: Windowed Operations
+
+Calculate the rolling maximum of an R vector over a window shorter than the vector length.
+
+<span class="highlight1">SLOWER</span>
+
+1. 'efficient' algorithm implemented in C++
+<br />(one-pass using standard library 'deque' and 'pair')
+ 
+2. 'naive' algorithm implemented in C
+<br />(includes nested inner loop)
+
+<span class="highlight2">FASTER</span>
+
+=>
+
+- Need to consider hidden overhead
+
+
+---
+
+class: chapter-slide
+
+# Wrapping a C Library
+
+---
+
+class: chapter-slide
+
+# 1. Idiomatic R Interface
+
+---
+
+### Lost in Translation
+
+#### Key Challenge 1: C is not object-oriented
+
+- Implementing generics is not easy - often functions are duplicated for different types of object
+    e.g. 
+    ```c
+    nng_socket_set()
+    nng_ctx_set()
+    nng_dialer_set()
+    nng_listener_set()
+    .
+    .
+    .
+    ```
+
+---
+
+### Lost in Translation
+
+#### Key Challenge 1: C is not object-oriented
+
+- Implementing generics is not easy - often functions are duplicated for different types of object
+    e.g. 
+    ```c
+    nng_socket_set()
+    nng_ctx_set()
+    nng_dialer_set()
+    nng_listener_set()
+    .
+    .
+    .
+    ```
+
+- Functions should behave in a way familiar to R users
+
+  ```r
+  setopt(object, ...)
+  ```
+
+---
+
+
+### Lost in Translation
+
+#### Key Challenge 1: C is not object-oriented
+
+- Implementing generics is not easy - often functions are duplicated for different types of object
+    e.g. 
+    ```c
+    nng_socket_set()
+    nng_ctx_set()
+    nng_dialer_set()
+    nng_listener_set()
+    .
+    .
+    .
+    ```
+
+- Functions should behave in a way familiar to R users
+
+  ```r
+  setopt(object, ...)
+  ```
+
+- Can be implemented as an S3 generic with methods in R
+
+---
+
+
+### Lost in Translation
+
+#### Key Challenge 1: C is not object-oriented
+
+- Implementing generics is not easy - often functions are duplicated for different types of object
+    e.g. 
+    ```c
+    nng_socket_set()
+    nng_ctx_set()
+    nng_dialer_set()
+    nng_listener_set()
+    .
+    .
+    .
+    ```
+
+- Functions should behave in a way familiar to R users
+
+  ```r
+  setopt(object, ...)
+  ```
+- Can be implemented as an S3 generic with methods in R
+
+- Or wrap C objects in a `struct` with `void` member, using `type` identifier
+  ...
+
+---
+
+### Lost in Translation
+
+#### Key Challenge 2: C functions are often too atomic
+
+- Outputs of individual C functions do not map readily to R objects
+
+- Useless to wrap each C function
+  + Technically possible to create external pointer for each C object
+  + Would be terribly inefficient
+
+---
+
+### Lost in Translation
+
+#### Key Challenge 2: C functions are often too atomic
+
+- Outputs of individual C functions do not map readily to R objects
+
+- Useless to wrap each C function
+  + Technically possible to create external pointer for each C object
+  + Would be terribly inefficient
+
+#### Solution
+
+- Take R inputs
+- Sequence of C functions (mapping)
+- Return R outputs (useful values)
+
+---
+
+### Lost in Translation
+
+- Example:
+
+```r
+context <- function(socket) 
+{
+    .Call(rnng_ctx_open, socket)
+}
+```
+
+---
+### Lost in Translation
+
+- Example:
+
+```c
+SEXP rnng_ctx_open(SEXP socket) {
+
+  if (R_ExternalPtrTag(socket) != nano_SocketSymbol)
+    error_return("'socket' is not a valid Socket");
+  nng_socket *sock = (nng_socket *) R_ExternalPtrAddr(socket);
+  nng_ctx *ctxp = R_Calloc(1, nng_ctx);
+  SEXP context, klass;
+
+  int xc = nng_ctx_open(ctxp, *sock);
+  if (xc) {
+    R_Free(ctxp);
+    return mk_error(xc);
+  }
+
+
+```
+
+---
+### Lost in Translation
+
+- Example:
+
+```c
+  PROTECT(context = R_MakeExternalPtr(ctxp, nano_ContextSymbol, R_NilValue));
+  R_RegisterCFinalizerEx(context, context_finalizer, TRUE);
+
+  PROTECT(klass = Rf_allocVector(STRSXP, 2));
+  SET_STRING_ELT(klass, 0, Rf_mkChar("nanoContext"));
+  SET_STRING_ELT(klass, 1, Rf_mkChar("nano"));
+  Rf_classgets(context, klass);
+  Rf_setAttrib(context, nano_IdSymbol, Rf_ScalarInteger((int) ctxp->id));
+  Rf_setAttrib(context, nano_StateSymbol, Rf_mkString("opened"));
+  Rf_setAttrib(context, nano_ProtocolSymbol,
+                        Rf_getAttrib(socket, nano_ProtocolSymbol));
+  Rf_setAttrib(context, nano_SocketSymbol, Rf_ScalarInteger((int) sock->id));
+
+  UNPROTECT(2);
+  return context;
+
+}
+```
+---
+### Lost in Translation
+
+#### Considerations
+
+- Ratio of R/C code dependent on purpose
+
+- Each `.Call()` call is costly
+
+- Balance efficiency / composability
+
+- For nanonext performance is key consideration hence many functions are a call straight to C code with the R function consisting of a single `.Call()`
+---
+
+class: chapter-slide
+
+# 2. The External Pointer
+
+---
+
+### Power of the External Pointer
+
+- When you have a C object you want to keep around and re-use
+  + Such as a socket...
+
+```c
+  PROTECT(socket = R_MakeExternalPtr(sock, nano_SocketSymbol, R_NilValue));
+  R_RegisterCFinalizerEx(socket, socket_finalizer, TRUE);
+
+  PROTECT(klass = Rf_allocVector(STRSXP, 2));
+  SET_STRING_ELT(klass, 0, Rf_mkChar("nanoSocket"));
+  SET_STRING_ELT(klass, 1, Rf_mkChar("nano"));
+  Rf_classgets(socket, klass);
+
+  UNPROTECT(2);
+  return socket;
+```
+
+- External pointer creates an R object that keeps alive the C object
+
+- Pointer to the memory address
+
+- Usually a finalizer is also set
+  + When the R object is garbage collected, ensure the C code exits gracefully, allocated resources are freed
+
+---
+
+class: chapter-slide
+
+# 3. CRAN-ready Package
+
+---
+
+### CRAN-ready Package
+
+- Portability (across Linux, Windows, Mac, Solaris)
+
+- Special treatment for Windows
+
+- For wrapping a library, 3 options:
+
+  1. Rely on system installation (Jeroen Ooms' Anticonf TM) - Configure script needs to detect different platforms, check for library version etc.
+
+  2. Download and build source (nanonext - as more recent library version required)
+
+  3. Bundle (modified) source (higher cost of maintenance vs more flexibility)
+
+---
+
+### Special Treatment for Windows
+
+- Winlibs approach
+
+  + Pre-build static libraries (on Windows or cross-compile)
+  
+  + Host on Github or another public repository
+  
+  + Include an R script `tools/winlibs.R` to download and process
+  
+- Build from source using the Windows Rtools40/42 toolchain
+
+  + The 'recommended' approach
+  
+  + Limited availablility of toolchain on windows machines
+
+- End users likely to rely on CRAN-built binary in any case
+
+---
+
+class: chapter-slide
+
+# 4. Engaging with the Community
+
+---
+
+### Engaging with the Community
+
+- Inform
+
+  + Upstream via Github / Discord / Slack etc.
+  + R community via rweekly / R-Bloggers
+  + R task views once package is stable
+  + Pkgdown site / readme / vignettes essential
+
+---
+
+### Engaging with the Community
+
+- Inform
+  + Upstream via Github / Discord / Slack etc.
+  + R community via rweekly / R-Bloggers
+  + R task views once package is stable
+  + Pkgdown site / readme / vignettes essential
+
+- Contribute
+  + Responsive to Github issues from users
+  + Suggestions or bug reports to upstream
+
+---
+
+### Engaging with the Community
+
+- Inform
+  + Upstream via Github / Discord / Slack etc.
+  + R community via rweekly / R-Bloggers
+  + R task views once package is stable
+  + Pkgdown site / readme / vignettes essential
+
+- Contribute
+  + Responsive to Github issues from users
+  + Suggestions or bug reports to upstream
+
+- Incorporate
+  + Package improvements leveraging community input
+
+---
+
+background-image: url(https://shikokuchuo.net/img/SKC.jpg)
+background-size: cover
+background-position: center
+
+## This presentation lives at:
+<https://shikokuchuo.net/user2022-conference/>
+
+---
+
+class: chapter-slide
+
+# Appendix A: Matrix to Dataframe Conversion
+
+---
+
+### 1. as.data.frame()
+
+- Known to be slow:
+  
+  + S3 generic
+  
+  + data validation
+
+### 2. Rcpp coerce to data frame
+
+```c
+#include <Rcpp.h>
+
+// [[Rcpp::export]]
+Rcpp::DataFrame ichimoku_df(const Rcpp::NumericMatrix& x) {
+  return x;
+}
+```
+
+- Caveat: unlikely to be the fastest possible method in C++
+
+- But slower than doing it efficiently in R
+
+---
+
+### 3. Efficient method in R
+
+```r
+matrix_df <- function (x) 
+{
+    dn <- dimnames(x)
+    xlen <- dim(x)[1L]
+    len <- dim(x)[2L]
+*   start <- 0:(len - 1) * xlen + 1L
+*   end <- 1:len * xlen
+    attributes(x) <- NULL
+    df <- vector(mode = "list", length = len)
+    for (i in seq_along(df)) {
+       df[[i]] <- x[start[i]:end[i]]
+    }
+    `attributes<-`(df, list(names = dn[[2L]], class = "data.frame", 
+        row.names = if (is.null(dn[[1L]]))
+          .set_row_names(xlen)
+        else
+          dn[[1L]]))
+}
+```
+- **Calculate matrix column boundaries (R matrices are column-major / Fortran order)**
+
+---
+
+### 3. Efficient method in R
+
+```r
+matrix_df <- function (x) 
+{
+    dn <- dimnames(x)
+    xlen <- dim(x)[1L]
+    len <- dim(x)[2L]
+    start <- 0:(len - 1) * xlen + 1L
+    end <- 1:len * xlen
+*   attributes(x) <- NULL
+    df <- vector(mode = "list", length = len)
+    for (i in seq_along(df)) {
+        df[[i]] <- x[start[i]:end[i]]
+    }
+    `attributes<-`(df, list(names = dn[[2L]], class = "data.frame", 
+        row.names = if (is.null(dn[[1L]]))
+          .set_row_names(xlen)
+        else
+          dn[[1L]]))
+}
+```
+- Calculate matrix column boundaries (R matrices are column-major / Fortran order)
+- **Remove attributes to convert matrix to an atomic vector**
+
+---
+### 3. Efficient method in R
+
+```r
+matrix_df <- function (x) 
+{
+    dn <- dimnames(x)
+    xlen <- dim(x)[1L]
+    len <- dim(x)[2L]
+    start <- 0:(len - 1) * xlen + 1L
+    end <- 1:len * xlen
+    attributes(x) <- NULL
+*   df <- vector(mode = "list", length = len)
+*   for (i in seq_along(df)) {
+*       df[[i]] <- x[start[i]:end[i]]
+*   }
+    `attributes<-`(df, list(names = dn[[2L]], class = "data.frame", 
+        row.names = if (is.null(dn[[1L]]))
+          .set_row_names(xlen)
+        else
+          dn[[1L]]))
+}
+```
+
+- Calculate matrix column boundaries (R matrices are column-major / Fortran order)
+- Remove attributes to convert matrix to an atomic vector
+- **Create list and copy across each matrix column**
+
+---
+### 3. Efficient method in R
+
+```r
+matrix_df <- function (x) 
+{
+    dn <- dimnames(x)
+    xlen <- dim(x)[1L]
+    len <- dim(x)[2L]
+    start <- 0:(len - 1) * xlen + 1L
+    end <- 1:len * xlen
+    attributes(x) <- NULL
+    df <- vector(mode = "list", length = len)
+    for (i in seq_along(df)) {
+        df[[i]] <- x[start[i]:end[i]]
+    }
+*   `attributes<-`(df, list(names = dn[[2L]], class = "data.frame", 
+*       row.names = if (is.null(dn[[1L]]))
+*         .set_row_names(xlen)
+*       else
+*         dn[[1L]]))
+}
+```
+
+- Calculate matrix column boundaries (R matrices are column-major / Fortran order)
+- Remove attributes to convert matrix to an atomic vector
+- Create list and copy each column across
+- **Add attributes to make it a valid dataframe**
+
+---
+
+### 4. Memcpy in C
+
+```c
+  R_xlen_t xlen = 0, xwid = 0;
+  const SEXP dims = Rf_getAttrib(x, R_DimSymbol);
+  xlen = INTEGER(dims)[0];
+  xwid = INTEGER(dims)[1];
+  
+* double *src = REAL(x);
+* size_t vecsize = xlen * sizeof(double);
+  for (R_xlen_t j = 1; j <= xwid; j++) {
+    SEXP vec = Rf_allocVector(REALSXP, xlen);
+    SET_VECTOR_ELT(df, j, vec);
+    memcpy(REAL(vec), src, vecsize);
+    src += xlen;
+  }
+```
+
+- **Create source pointer and define size of vector in bytes**
+
+---
+
+### 4. Memcpy in C
+
+```c
+  R_xlen_t xlen = 0, xwid = 0;
+  const SEXP dims = Rf_getAttrib(x, R_DimSymbol);
+  xlen = INTEGER(dims)[0];
+  xwid = INTEGER(dims)[1];
+  
+  double *src = REAL(x);
+  size_t vecsize = xlen * sizeof(double);
+  for (R_xlen_t j = 1; j <= xwid; j++) {
+*   SEXP vec = Rf_allocVector(REALSXP, xlen);
+*   SET_VECTOR_ELT(df, j, vec);
+    memcpy(REAL(vec), src, vecsize);
+    src += xlen;
+  }
+```
+
+- Create source pointer and define size of vector in bytes
+- **Create destination double vector, add it to the list (data frame)**
+
+---
+
+### 4. Memcpy in C
+
+```c
+  R_xlen_t xlen = 0, xwid = 0;
+  const SEXP dims = Rf_getAttrib(x, R_DimSymbol);
+  xlen = INTEGER(dims)[0];
+  xwid = INTEGER(dims)[1];
+  
+  double *src = REAL(x);
+  size_t vecsize = xlen * sizeof(double);
+  for (R_xlen_t j = 1; j <= xwid; j++) {
+    SEXP vec = Rf_allocVector(REALSXP, xlen);
+    SET_VECTOR_ELT(df, j, vec);
+*   memcpy(REAL(vec), src, vecsize);
+    src += xlen;
+  }
+```
+
+- Create source pointer and define size of vector in bytes
+- Create destination double vector, add it to the list (data frame)
+- ** Memcpy from source pointer to destination pointer the buffer size**
+
+---
+
+### 4. Memcpy in C
+
+```c
+  R_xlen_t xlen = 0, xwid = 0;
+  const SEXP dims = Rf_getAttrib(x, R_DimSymbol);
+  xlen = INTEGER(dims)[0];
+  xwid = INTEGER(dims)[1];
+  
+  double *src = REAL(x);
+  size_t vecsize = xlen * sizeof(double);
+  for (R_xlen_t j = 1; j <= xwid; j++) {
+    SEXP vec = Rf_allocVector(REALSXP, xlen);
+    SET_VECTOR_ELT(df, j, vec);
+    memcpy(REAL(vec), src, vecsize);
+    src += xlen;
+  }
+```
+
+- Create source pointer and define size of vector in bytes
+- Create destination double vector, add it to the list (data frame)
+- Memcpy from source pointer to destination pointer the buffer size
+
+##### Conclusion
+- C is great for manipulating simple structures
+- Easier to use R for everything else
+- Some combination of C and R likely to be optimal
+
+---
+
+class: chapter-slide
+
+# Appendix B: Windowed Operations
+
+---
+
+### 1. 'Efficient' algorithm implemented in C++
+
+```c
+cpp11::doubles maxOver(const cpp11::doubles& x, int window) {
+
+  int n = x.size(), w1 = window - 1;
+  cpp11::writable::doubles vec(n);
+  std::deque<std::pair<long double, int>> deck;
+* for (int i = 0; i < n; ++i) {
+      while (!deck.empty() && deck.back().first <= x[i])
+        deck.pop_back();
+    deck.push_back(std::make_pair(x[i], i));
+    while(deck.front().second <= i - window)
+      deck.pop_front();
+    long double max = deck.front().first;
+    if (i >= w1) {
+      vec[i] = max;
+    } else {
+      vec[i] = NA_REAL;
+    }
+* }
+  return vec;
+}
+```
+
+- **Efficient 'one-pass' algorithm in C++**
+.footnote[
+[1] Adapted from original code by Kevin Ushey
+]
+---
+
+### 1. 'Efficient' algorithm implemented in C++
+
+```c
+cpp11::doubles maxOver(const cpp11::doubles& x, int window) {
+
+  int n = x.size(), w1 = window - 1;
+  cpp11::writable::doubles vec(n);
+* std::deque<std::pair<long double, int>> deck;
+  for (int i = 0; i < n; ++i) {
+      while (!deck.empty() && deck.back().first <= x[i])
+        deck.pop_back();
+    deck.push_back(std::make_pair(x[i], i));
+    while(deck.front().second <= i - window)
+      deck.pop_front();
+    long double max = deck.front().first;
+    if (i >= w1) {
+      vec[i] = max;
+    } else {
+      vec[i] = NA_REAL;
+    }
+  }
+  return vec;
+}
+```
+
+- Efficient 'one-pass' algorithm in C++
+- **Uses standard library structures 'deque' and 'pair'**
+.footnote[
+[1] Adapted from original code by Kevin Ushey
+]
+---
+
+### 2. 'Naive' algorithm implemented in C
+
+```c
+SEXP _wmax(const SEXP x, const SEXP window) {
+
+  const double *px = REAL(x);
+  const R_xlen_t n = Rf_xlength(x);
+  const int w = INTEGER(window)[0], w1 = w - 1;
+  SEXP vec = Rf_allocVector(REALSXP, n);
+  double *pvec = REAL(vec), s = 0;
+
+  for (int i = 0; i < w1; i++) {
+    pvec[i] = NA_REAL;
+  }
+* for (R_xlen_t i = w1; i < n; i++) {
+    s = px[i];
+*   for (int j = 1; j < w; j++) {
+      if (px[i - j] > s)
+        s = px[i - j];
+*   }
+    pvec[i] = s;
+* }
+  return vec;
+}
+```
+
+- **Includes a nested inner loop**
+
+---
+
+### 2. 'Naive' algorithm implemented in C
+
+```c
+SEXP _wmax(const SEXP x, const SEXP window) {
+
+  const double *px = REAL(x);
+  const R_xlen_t n = Rf_xlength(x);
+  const int w = INTEGER(window)[0], w1 = w - 1;
+  SEXP vec = Rf_allocVector(REALSXP, n);
+  double *pvec = REAL(vec), s = 0;
+
+  for (int i = 0; i < w1; i++) {
+    pvec[i] = NA_REAL;
+  }
+  for (R_xlen_t i = w1; i < n; i++) {
+    s = px[i];
+    for (int j = 1; j < w; j++) {
+      if (px[i - j] > s)
+        s = px[i - j];
+    }
+    pvec[i] = s;
+  }
+  return vec;
+}
+```
+
+- Includes a nested inner loop
+
+- But still faster than C++ version
+=>
+  + Need to consider hidden overhead
+
+---
+
+class: chapter-slide
+
+# Appendix C: R's C Interface
+
+---
+
+### R' C Interface(s)
+
+Example:
+
+```r
+nng_error <- function(xc) .Call(rnng_strerror, xc)
+```
+
+- **.Call()**
+  + 'modern' recommended interface
+
+- .External()
+  + for passing in arguments of varying length
+
+- .C()
+  + original interface along with .Fortran(), used mostly for numerical routines
+
+Reference:<br />
+<https://www.r-project.org/conferences/useR-2004/Keynotes/Dalgaard.pdf>
+
+---
+### Boilerplate Stuff
+
+In file <span class = "highlight1">`src/nanonext.h`</span>
+
+```c
+
+#ifndef NANONEXT_H
+#define NANONEXT_H
+
+extern SEXP rnng_aio_call(SEXP);
+extern SEXP rnng_aio_get_msg(SEXP, SEXP, SEXP);
+
+.
+.
+.
+
+#endif
+
+```
+
+- extern = find the definitions elsewhere
+
+
+---
+
+### Boilerplate Stuff (Cont'd)
+
+In file <span class = "highlight1">`src/init.c`</span>
+
+```c
+
+*#include "nanonext.h"            // Package header file (we just created)
+#include <nng/nng.h>             // Header for library to be wrapped
+
+#define R_NO_REMAP               // Good practice for new code
+#define STRICT_R_HEADERS         // Good practice for new code
+
+#include <R.h>                   // R headers
+#include <Rinternals.h>          // R headers (public API, not internal)
+#include <R_ext/Visibility.h>    // R headers (only required for init.c)
+
+static const R_CallMethodDef CallEntries[] = {
+  // .Call function name, C function name, no. of arguments
+  {"rnng_aio_call", (DL_FUNC) &rnng_aio_call, 1},
+  {"rnng_aio_get_msg", (DL_FUNC) &rnng_aio_get_msg, 3},
+  {NULL, NULL, 0}
+};
+
+// Can use verbatim, change package name
+void attribute_visible R_init_nanonext(DllInfo* dll) {
+  R_registerRoutines(dll, NULL, CallEntries, NULL, NULL);
+  R_useDynamicSymbols(dll, FALSE);
+  R_forceSymbols(dll, TRUE);
+}
+
+```
+---
+
+### Boilerplate Stuff (Cont'd)
+
+In file <span class = "highlight1">`src/init.c`</span>
+
+```c
+
+#include "nanonext.h"            // Package header file
+*#include <nng/nng.h>             // Header for library to be wrapped
+
+#define R_NO_REMAP               // Good practice for new code
+#define STRICT_R_HEADERS         // Good practice for new code
+
+#include <R.h>                   // R headers
+#include <Rinternals.h>          // R headers (public API, not internal)
+#include <R_ext/Visibility.h>    // R headers (only required for init.c)
+
+static const R_CallMethodDef CallEntries[] = {
+  // .Call function name, C function name, no. of arguments
+  {"rnng_aio_call", (DL_FUNC) &rnng_aio_call, 1},
+  {"rnng_aio_get_msg", (DL_FUNC) &rnng_aio_get_msg, 3},
+  {NULL, NULL, 0}
+};
+
+// Can use verbatim, change package name
+void attribute_visible R_init_nanonext(DllInfo* dll) {
+  R_registerRoutines(dll, NULL, CallEntries, NULL, NULL);
+  R_useDynamicSymbols(dll, FALSE);
+  R_forceSymbols(dll, TRUE);
+}
+
+```
+---
+
+
+### Boilerplate Stuff (Cont'd)
+
+In file <span class = "highlight1">`src/init.c`</span>
+
+```c
+
+#include "nanonext.h"            // Package header file
+#include <nng/nng.h>             // Header for library to be wrapped
+
+*#define R_NO_REMAP               // Good practice for new code
+*#define STRICT_R_HEADERS         // Good practice for new code
+
+#include <R.h>                   // R headers
+#include <Rinternals.h>          // R headers (public API, not internal)
+#include <R_ext/Visibility.h>    // R headers (only required for init.c)
+
+static const R_CallMethodDef CallEntries[] = {
+  // .Call function name, C function name, no. of arguments
+  {"rnng_aio_call", (DL_FUNC) &rnng_aio_call, 1},
+  {"rnng_aio_get_msg", (DL_FUNC) &rnng_aio_get_msg, 3},
+  {NULL, NULL, 0}
+};
+
+// Can use verbatim, change package name
+void attribute_visible R_init_nanonext(DllInfo* dll) {
+  R_registerRoutines(dll, NULL, CallEntries, NULL, NULL);
+  R_useDynamicSymbols(dll, FALSE);
+  R_forceSymbols(dll, TRUE);
+}
+
+```
+---
+
+### Boilerplate Stuff (Cont'd)
+
+In file <span class = "highlight1">`src/init.c`</span>
+
+```c
+
+#include "nanonext.h"            // Package header file
+*#include <nng/nng.h>             // Header for library to be wrapped
+
+#define R_NO_REMAP               // Good practice for new code
+#define STRICT_R_HEADERS         // Good practice for new code
+
+*#include <R.h>                   // R headers
+*#include <Rinternals.h>          // R headers (public API, not internal)
+*#include <R_ext/Visibility.h>    // R headers (only required for init.c)
+
+static const R_CallMethodDef CallEntries[] = {
+  // .Call function name, C function name, no. of arguments
+  {"rnng_aio_call", (DL_FUNC) &rnng_aio_call, 1},
+  {"rnng_aio_get_msg", (DL_FUNC) &rnng_aio_get_msg, 3},
+  {NULL, NULL, 0}
+};
+
+// Can use verbatim, change package name
+void attribute_visible R_init_nanonext(DllInfo* dll) {
+  R_registerRoutines(dll, NULL, CallEntries, NULL, NULL);
+  R_useDynamicSymbols(dll, FALSE);
+  R_forceSymbols(dll, TRUE);
+}
+
+```
+---
+
+### Boilerplate Stuff (Cont'd)
+
+In file <span class = "highlight1">`src/init.c`</span>
+
+```c
+
+#include "nanonext.h"            // Package header file
+*#include <nng/nng.h>             // Header for library to be wrapped
+
+#define R_NO_REMAP               // Good practice for new code
+#define STRICT_R_HEADERS         // Good practice for new code
+
+#include <R.h>                   // R headers
+#include <Rinternals.h>          // R headers (public API, not internal)
+#include <R_ext/Visibility.h>    // R headers (only required for init.c)
+
+static const R_CallMethodDef CallEntries[] = {
+* // .Call function name, C function name, no. of arguments
+  {"rnng_aio_call", (DL_FUNC) &rnng_aio_call, 1},
+  {"rnng_aio_get_msg", (DL_FUNC) &rnng_aio_get_msg, 3},
+  {NULL, NULL, 0}
+};
+
+// Can use verbatim, change package name
+void attribute_visible R_init_nanonext(DllInfo* dll) {
+  R_registerRoutines(dll, NULL, CallEntries, NULL, NULL);
+  R_useDynamicSymbols(dll, FALSE);
+  R_forceSymbols(dll, TRUE);
+}
+
+```
+
+---
+
+### Boilerplate Stuff (Cont'd)
+
+In file <span class = "highlight1">`src/init.c`</span>
+
+```c
+
+#include "nanonext.h"            // Package header file
+*#include <nng/nng.h>             // Header for library to be wrapped
+
+#define R_NO_REMAP               // Good practice for new code
+#define STRICT_R_HEADERS         // Good practice for new code
+
+#include <R.h>                   // R headers
+#include <Rinternals.h>          // R headers (public API, not internal)
+#include <R_ext/Visibility.h>    // R headers (only required for init.c)
+
+static const R_CallMethodDef CallEntries[] = {
+  // .Call function name, C function name, no. of arguments
+  {"rnng_aio_call", (DL_FUNC) &rnng_aio_call, 1},
+  {"rnng_aio_get_msg", (DL_FUNC) &rnng_aio_get_msg, 3},
+  {NULL, NULL, 0}
+};
+
+*// Can use verbatim, change package name
+void attribute_visible R_init_nanonext(DllInfo* dll) {
+  R_registerRoutines(dll, NULL, CallEntries, NULL, NULL);
+  R_useDynamicSymbols(dll, FALSE);
+  R_forceSymbols(dll, TRUE);
+}
+
+```
+
+---
+
+### Boilerplate Stuff (Cont'd)
+
+In file <span class = "highlight1">`R/nanonext-package.R`</span>
+
+```r
+#' @useDynLib nanonext, .registration = TRUE
+#'
+NULL
+```
+
+Use <span class = "highlight2">`devtools::document()`</span> to generate correct documentation and NAMESPACE file.
+
+---
+
+### Reference
+
+For C API definitions and data types:
+
+- Hadley Wickham's notes:<br /> <https://github.com/hadley/r-internals>
+
+- Writing R extensions:<br /> <https://cran.r-project.org/doc/manuals/r-release/R-exts.html>
+  
+---
+
+### Obligatory Slide on Protection
+
+Example:
+
+```c
+  PROTECT(version = Rf_allocVector(STRSXP, 2));
+  SET_STRING_ELT(version, 0, Rf_mkChar(ver));
+  SET_STRING_ELT(version, 1, Rf_mkChar(tls));
+
+  UNPROTECT(1);
+  return version;
+```
+
+- All functions which allocate new R objects may trigger GC
+- Need to PROTECT objects created but not yet returned to R
+
+- `rchk` automatic tooling available to check common protect errors
+  + Docker container
+  + Via rhub `rhub::platforms()`
+
+- Common protect errors authored by Tomas Kalibera: <br />
+<https://developer.r-project.org/Blog/public/2019/04/18/common-protect-errors/>
+
+<br /><br /><br />
+<span class = "highlight1">Ultimately not the most difficult thing about working with R's C API!</span>
+
+---
+
+class: chapter-slide
+
+# Appendix D: The External Pointer
+
+---
+
+### Creating an External Pointer
+
+- When you have a C object you want to keep around and re-use
+  + Such as a socket...
+
+```c
+* PROTECT(socket = R_MakeExternalPtr(sock, nano_SocketSymbol, R_NilValue));
+  R_RegisterCFinalizerEx(socket, socket_finalizer, TRUE);
+
+  PROTECT(klass = Rf_allocVector(STRSXP, 2));
+  SET_STRING_ELT(klass, 0, Rf_mkChar("nanoSocket"));
+  SET_STRING_ELT(klass, 1, Rf_mkChar("nano"));
+  Rf_classgets(socket, klass);
+
+  UNPROTECT(2);
+  return socket;
+```
+
+- **nano_SocketSymbol is defined previously by a call to `Rf_install()`**
+
+---
+
+### Creating an External Pointer
+
+- When you have a C object you want to keep around and re-use
+  + Such as a socket...
+
+```c
+  PROTECT(socket = R_MakeExternalPtr(sock, nano_SocketSymbol, R_NilValue));
+* R_RegisterCFinalizerEx(socket, socket_finalizer, TRUE);
+
+  PROTECT(klass = Rf_allocVector(STRSXP, 2));
+  SET_STRING_ELT(klass, 0, Rf_mkChar("nanoSocket"));
+  SET_STRING_ELT(klass, 1, Rf_mkChar("nano"));
+  Rf_classgets(socket, klass);
+
+  UNPROTECT(2);
+  return socket;
+```
+
+- nano_SocketSymbol is defined previously by a call to `Rf_install()`
+
+- **Usually a finalizer is also set (there are variants that run C or R code)**
+
+---
+
+### Power of the External Pointer
+
+- External pointer creates an R object that keeps alive the C object
+
+- Pointer to the memory address
+  
+- When passing back to a C function that takes the pointer, check the external pointer tag
+
+```c
+// TYPEOF(object) == EXTPTRSXP check optional as
+// R_ExternalPtrTag() also returns for other object types
+
+  if (R_ExternalPtrTag(socket) != nano_SocketSymbol)
+    error_return("'socket' is not a valid Socket");
+```
+
+- Be sure to cast to correct object type when using
+
+```c
+  nng_socket *sock = (nng_socket *) R_ExternalPtrAddr(socket);
+```
+---
+
+### Registering a Finalizer
+
+- When the R object is garbage collected, ensure the C code exits gracefully, resources are freed
+
+Example:
+ 
+```c
+void socket_finalizer(SEXP xptr) {
+
+  if (R_ExternalPtrAddr(xptr) == NULL)
+    return;
+  nng_socket *xp = (nng_socket *) R_ExternalPtrAddr(xptr);
+  nng_close(*xp);
+  R_Free(xp);
+
+}
+```
+
+---
+
+### Registering a Finalizer
+
+- When the R object is garbage collected, ensure the C code exits gracefully, resources are freed
+
+Example:
+ 
+```c
+void socket_finalizer(SEXP xptr) {
+
+* if (R_ExternalPtrAddr(xptr) == NULL)
+*   return;
+  nng_socket *xp = (nng_socket *) R_ExternalPtrAddr(xptr);
+  nng_close(*xp);
+  R_Free(xp);
+
+}
+```
+
+- Test external pointer address for NULL just in case to prevent double free!
+
+---
+### Registering a Finalizer
+
+- When the R object is garbage collected, ensure the C code exits gracefully, resources are freed
+
+Example:
+ 
+```c
+void socket_finalizer(SEXP xptr) {
+
+  if (R_ExternalPtrAddr(xptr) == NULL)
+    return;
+* nng_socket *xp = (nng_socket *) R_ExternalPtrAddr(xptr);
+* nng_close(*xp);
+  R_Free(xp);
+
+}
+```
+
+- Test external pointer address for NULL just in case to prevent double free!
+
+- Cast object and apply C function that terminates the code properly
+
+---
+### Registering a Finalizer
+
+- When the R object is garbage collected, ensure the C code exits gracefully, resources are freed
+
+Example:
+ 
+```c
+void socket_finalizer(SEXP xptr) {
+
+  if (R_ExternalPtrAddr(xptr) == NULL)
+    return;
+  nng_socket *xp = (nng_socket *) R_ExternalPtrAddr(xptr);
+  nng_close(*xp);
+* R_Free(xp);
+
+}
+```
+
+- Test external pointer address for NULL just in case to prevent double free!
+
+- Cast object and apply C function that terminates the code properly
+
+- Free the allocated memory
+
+---
+
+class: chapter-slide
+
+# Appendix E: CRAN-ready Package
+
+---
+
+### Configure, Makevars (Boilerplate stuff)
+
+- `configure` in package root directory
+- Detects system options, writes to `src/Makevars`
+
+- `cleanup` also in package root to delete `src/Makevars` and any other temporary files written by `configure`
+
+Boilerplate stuff:
+
+- src/Makevars.in
+- src/Makevars.win
+- src/Makevars.ucrt
+
+<span class = "highlight2">Please feel free to refer to the files in the nanonext package as a template</span>
+<https://github.com/shikokuchuo/nanonext/>
+
+---
+
+### Description
+
+SystemRequirements field needs to say something sensible such as:
+
+```r
+SystemRequirements: either 'libnng' (deb: libnng-dev, rpm: nng-devel)
+    or 'cmake' (to compile from source)
+```
+
+---
+
+class: chapter-slide
+
+## This presentation lives at:
+<https://shikokuchuo.net/user2022-conference/>
