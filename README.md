@@ -11,3 +11,5 @@ This repository hosts materials prepared for the useR! 2022 Conference
 - Author: Charlie Gao
 
 - Copyright: Hibiki AI Limited
+
+- Link: https://shikokuchuo.net/user2022-conference/presentation.html
