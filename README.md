@@ -12,4 +12,4 @@ This repository hosts materials prepared for the useR! 2022 Conference
 
 - Copyright: Hibiki AI Limited
 
-- Link: https://shikokuchuo.net/user2022-conference/presentation.html
+- Link: <https://shikokuchuo.net/user2022-conference/presentation.html>
